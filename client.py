@@ -35,6 +35,7 @@ class MediaClient(QuicConnectionProtocol):
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ProtocolNegotiated):
+            logger.info(f"Protocol negotiated: {event.alpn_protocol}")
             if event.alpn_protocol in H3_ALPN:
                 logger.info(f"Protocol negotiated: {event.alpn_protocol}")
                 self._http = H3Connection(self._quic, enable_webtransport=True)
@@ -86,6 +87,7 @@ class StreamClient(MediaClient):
         return await asyncio.shield(waiter)
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        logger.debug(f"Event received: {event}")
         if self._ack_waiter is not None:
             if isinstance(event, DatagramFrameReceived) and event.data == b"sendMedia-ack":
                 waiter = self._ack_waiter
@@ -143,7 +145,7 @@ if __name__ == "__main__":
     )
 
     configuration = QuicConfiguration(
-        alpn_protocols=["h3"], is_client=True, max_datagram_frame_size=65536
+        alpn_protocols=H3_ALPN, is_client=True, max_datagram_frame_size=65536
     )
     if args.insecure:
         configuration.verify_mode = ssl.CERT_NONE
