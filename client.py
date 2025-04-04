@@ -7,8 +7,13 @@ from typing import Optional, cast
 from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import DatagramFrameReceived, QuicEvent, PingAcknowledged
+from aioquic.quic.events import DatagramFrameReceived, QuicEvent, PingAcknowledged, HandshakeCompleted, ConnectionTerminated, ProtocolNegotiated
+from aioquic.h3.connection import H3Connection, H3_ALPN
 from aioquic.quic.logger import QuicFileLogger
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
 
 logger = logging.getLogger("client")
 
@@ -29,6 +34,24 @@ class MediaClient(QuicConnectionProtocol):
         return await asyncio.shield(waiter)
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        if isinstance(event, ProtocolNegotiated):
+            if event.alpn_protocol in H3_ALPN:
+                logger.info(f"Protocol negotiated: {event.alpn_protocol}")
+                self._http = H3Connection(self._quic, enable_webtransport=True)
+        if isinstance(event, ConnectionTerminated):
+            logger.error(
+                f"Connection terminated: {event.reason_phrase} (error code: {event.error_code})"
+            )
+            if self._ack_waiter is not None:
+                self._ack_waiter.set_exception(
+                    asyncio.CancelledError("Connection terminated")
+                )
+            return
+        if isinstance(event, HandshakeCompleted):
+            logger.info("Handshake completed successfully.")
+            # Optionally, you can send media immediately after handshake completion
+            #asyncio.create_task(self.sendMedia())
+            return
         if self._ack_waiter is not None:
             if isinstance(event, DatagramFrameReceived) and event.data == b"sendMedia-ack":
                 waiter = self._ack_waiter
@@ -37,7 +60,7 @@ class MediaClient(QuicConnectionProtocol):
             if isinstance(event, PingAcknowledged):
                 # If we receive a PingAcknowledged event, it means the connection is still alive.
                 logger.debug("Ping acknowledged, connection is alive.")
-                self.sendMedia()
+                #self.sendMedia()
 
 class StreamClient(MediaClient):
     """A specialized client that handles media streams, if needed.
@@ -71,14 +94,15 @@ class StreamClient(MediaClient):
             if isinstance(event, PingAcknowledged):
                 # If we receive a PingAcknowledged event, it means the connection is still alive.
                 logger.debug("Ping acknowledged, connection is alive.")
-                self.sendMedia()
+                #await self.sendMedia()
 async def main(configuration: QuicConfiguration, host: str, port: int) -> None:
     async with connect(
         host, port, configuration=configuration, create_protocol=MediaClient
     ) as client:
+        logger.info("Connected to server at %s:%d", host, port)
         client = cast(MediaClient, client)
         logger.info("sending sendMedia")
-        await client.sendMedia()
+        #await client.sendMedia()
         logger.info("received sendMedia-ack")
 
 
@@ -111,7 +135,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
+    logging.info("Starting SiDUCK client with arguments:")
+    logging.info(args)
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -126,7 +151,8 @@ if __name__ == "__main__":
         configuration.quic_logger = QuicFileLogger(args.quic_log)
     if args.secrets_log:
         configuration.secrets_log_file = open(args.secrets_log, "a")
-
+    if uvloop is not None:
+            uvloop.install()
     asyncio.run(
         main(
             configuration=configuration,
